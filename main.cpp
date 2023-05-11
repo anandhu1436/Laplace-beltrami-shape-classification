@@ -1,281 +1,247 @@
+
 #include <igl/opengl/glfw/Viewer.h>
 #include <iostream>
 #include <ostream>
 #include <igl/readOFF.h>
-#include <igl/doublearea.h>
 #include <igl/massmatrix.h>
-#include <igl/invert_diag.h>
-#include <igl/jet.h>
-
-#include <igl/gaussian_curvature.h>
-#include <igl/per_vertex_normals.h>
-#include <igl/per_face_normals.h>
-
-#include "HalfedgeBuilder.cpp"
+#include <igl/cotmatrix.h>
+#include <igl/eigs.h>
+#include <igl/vertex_triangle_adjacency.h>
+#include <Eigen/Core>
+#include <random>
 
 
 
-using namespace Eigen; // to use the classes provided by Eigen library
+#include <tgmath.h>
+#include <math.h>
+#include <fstream>
+#include <filesystem>
+#include <vector>
+
+
+
+
+namespace fs = std::__fs::filesystem;
 using namespace std;
 
-MatrixXd V;
-MatrixXi F;
+Eigen::MatrixXd V;
+Eigen::MatrixXi F;
+Eigen::MatrixXd N_vertices;
+std::vector<std::vector<int>> neighbour_map;
+string file;
 
 
-MatrixXd N_faces;   //computed calling pre-defined functions of LibiGL
-MatrixXd N_vertices; //computed calling pre-defined functions of LibiGL
 
-
-MatrixXd lib_N_vertices;  //computed using face-vertex structure of LibiGL
-MatrixXi lib_Deg_vertices;//computed using face-vertex structure of LibiGL
-
-MatrixXd he_N_vertices; //computed using the HalfEdge data structure
-
-
-// This function is called every time a keyboard button is pressed
-bool key_down(igl::opengl::glfw::Viewer& viewer, unsigned char key, int modifier){
-    switch(key){
-        case '1':
-            viewer.data().set_normals(N_faces);
-            return true;
-        case '2':
-            viewer.data().set_normals(N_vertices);
-            return true;
-        case '3':
-            viewer.data().set_normals(lib_N_vertices);
-            return true;
-        case '4':
-            viewer.data().set_normals(he_N_vertices);
-            return true;
-        default: break;
-    }
-    return false;
+float distance(Eigen::Vector3d a,Eigen::Vector3d b){
+    return sqrt(pow(a.x()-b.x(),2)+pow(a.y()-b.y(),2)+pow(a.z()-b.z(),2));
 }
 
-    
+void build_neighbour(){
+  neighbour_map.clear();
+  std::vector<std::vector<int>> VF;
+  std::vector<std::vector<int>> VFi;
+  igl::vertex_triangle_adjacency(V.rows(), F, VF, VFi);
+  for (int i = 0; i < V.rows(); ++i) {
+      std::vector<int> neigh;
+      std::vector<double> dist;
+      neigh.clear();
+      dist.clear();
+      for (int j = 0; j < VF[i].size(); ++j) {
+          int f = VF[i][j];
+          for (int k = 0; k < 3; ++k) {
+              int v_idx = F(f, k);
+              if (v_idx != i && std::find(neigh.begin(), neigh.end(), v_idx) == neigh.end()) {
+                  neigh.push_back(v_idx);
+              }
+          }
+      }
 
-MatrixXd surfaceLaplace(HalfedgeDS he){
-    int nV = he.sizeOfVertices();
-    
-    MatrixXd laplace;
-    laplace.setZero(he.sizeOfVertices(), he.sizeOfVertices());
-    
-    for (int vIndex = 0; vIndex < nV; vIndex++) {
-        int first_he = he.getEdge(vIndex);
-        int current_he = first_he;
-        
-        float sum_angles = 0;
-        float area_dual_cell = 0;
-        
-        Vector3d  v1 = V.row(vIndex);
-        
-        //traverse around 1-ring
-        do {
-            //get vertices of the face
-            int v2_index = he.getTarget(he.getNext(current_he));
-            int v3_index = he.getTarget(he.getPrev(current_he));
-            Vector3d  v2 = V.row(v2_index);
-            Vector3d  v3 = V.row(v3_index);
-            
-            //tip angle
-            float v1angle = acos((v2 - v1).dot(v3 - v1)/((v2 - v1).norm() * (v3 - v1).norm()));
-            sum_angles += v1angle;
-            
-            //dual cell area
-            //           float v2angle = F(i,j);
-            float alpha = acos((v1 - v3).dot(v2 - v3) / ((v1 - v3).norm() * (v2 - v3).norm()));
-            
-            // find A_voronoi
-            float v1v2 = (v1 - v2).norm(); //v1v2 length
-            
-            int v2_next_index = he.getTarget(he.getNext(he.getOpposite(he.getNext(current_he)))); //corresponding v2 of next triangle
-            Vector3d v2_next = V.row(v2_next_index);
-            float beta = acos((v1 - v2_next).dot(v2 - v2_next) / ((v1 - v2_next).norm() * (v2 - v2_next).norm()));
-            
-            float cot_alpha = cos(alpha) / sin(alpha);
-            float cot_beta = cos(beta) / sin(beta);
-            laplace(vIndex,v2_index) = -0.5 * (cot_alpha + cot_beta);
-            laplace(vIndex,vIndex) += 0.5 * (cot_alpha + cot_beta);
-            
-//            std::cout << "i = " << vIndex << " j = " << v2_index << std::endl;//
-//            std::cout << "alpha = " << alpha << " beta = " << beta << std::endl;
-//            std::cout << "cot_alpha = " << cot_alpha << " cot_beta = " << cot_beta << std::endl;
-//            std::cout << "(1/2) * (cot_alpha + cot_beta) = " << 0.5 * (cot_alpha + cot_beta) << std::endl;
-//            std::cout << laplace << std::endl;
-            
-            current_he = he.getOpposite(he.getNext(current_he));
-        }
-        while (current_he != first_he); // for each face
-        
-        
-    }
-    return laplace;
+  neighbour_map.push_back(neigh);
+  }
 }
 
-    
-    int vertex_neighbours(HalfedgeDS he, int v) {
-        int result=0;
-        int e=he.getEdge(v);
-        MatrixXd u_,v_;
-        RowVector3d v1=V.row(he.getTarget(e));
-        RowVector3d v2=V.row(he.getTarget(he.getOpposite(e)));
-        MatrixXd neigh(V.rows(),3);
-        neigh.row(0)=v2-v1;//v1-v2;
-        result++;
-        int pe=he.getOpposite(he.getNext(e));
-        
-        MatrixXd adjucencyM;
-        adjucencyM.setZero(he.sizeOfVertices(), he.sizeOfVertices());
-        
-        
-        while(pe!=e){
-            v2=V.row(he.getTarget(he.getOpposite(pe)));
-            neigh.row(result)=v2-v1;//v1-v2;
-            result++;
-            pe=he.getOpposite(he.getNext(pe));
+void add_noise(Eigen::MatrixXd& V, double noise_scale) {
+    // Create a random number generator
+    std::default_random_engine generator;
+    std::normal_distribution<double> distribution(0.0, noise_scale);
 
-        }
-        MatrixXd neighbours(result,3);
-
-        for (int i=0;i<result;i++){
-            neighbours.row(i)=neigh.row(i);
-        }
-
-
-        // std::cout<<neighbours<<std::endl;
-
-        MatrixXd cov = neighbours.transpose()*neighbours;
-        SelfAdjointEigenSolver<MatrixXd> eigen_solver((cov.transpose())*cov);
-        u_ = eigen_solver.eigenvalues();
-        v_ = eigen_solver.eigenvectors();
-
-        std::cout<<u_<<std::endl;
-        std::cout<<v_<<std::endl;
-        return result;
-
-    
+    // Add noise to each vertex
+    for (int i = 0; i < V.rows(); i++) {
+        Eigen::Vector3d noise(distribution(generator), distribution(generator), distribution(generator));
+        V.row(i) += noise;
     }
+}
+
+void add_noise_along_normals(Eigen::MatrixXd& V, double noise_mag)
+{
+    // Compute the vertex normals if they are not given
+    Eigen::MatrixXd N_vertices;
+    igl::per_vertex_normals(V, F, N_vertices);
+
+    // Perturb each vertex along its normal direction
+    // for(int i = 0; i < V.rows(); i++) {
+    //     Eigen::Vector3d noise = noise_mag * N_vertices.row(i);
+    //     V.row(i) += noise;
+    // }
+
+    std::default_random_engine generator;
+    std::normal_distribution<double> distribution(0.0, noise_mag);
+    for (int i = 0; i < V.rows(); i++) {
+        // Eigen::Vector3d n = N_vertices[i];
+        double magnitude = distribution(generator);
+        V.row(i) += magnitude * N_vertices.row(i);
+    }
+}
+
+
+void bilateral(Eigen::MatrixXd& V, Eigen::MatrixXi F) {
+    Eigen::MatrixXd N_vertices;
+    igl::per_vertex_normals(V, F, N_vertices);
 
     
-    /**
-     * Return the number of boundaries of the mesh
-   * Exercice
-     **/
-int countBoundaries(HalfedgeDS he){
-    // initialize boundary count to zero
-    int boundaries = 0;
-    // set bool list to track visited halfedges
-    bool visited[he.sizeOfHalfedges()];
-    //initialize with false
-    memset(visited,false,sizeof(visited));
+    std::vector<std::vector<double>> dist_map;
 
-
-    for(int i=0;i<he.sizeOfHalfedges();i++){
-        if(!visited[i]){
-            int last = he.getNext(he.getNext(he.getNext(i)));
-
-            if(i != last){
-                visited[i] = true;
-                last = he.getNext(i);
-
-                while(last != i){
-                    visited[last] = true;
-                    last = he.getNext(last);
+    for(int num=0;num<1;++num){
+      dist_map.clear();
+      for (int i = 0; i < V.rows(); ++i) {
+        std::vector<double> dist;
+        dist.clear();
+        for (int j = 0; j < neighbour_map[i].size(); ++j) {
+              dist.push_back(distance(V.row(i),V.row(neighbour_map[i][j])));
                 }
+            
+        dist_map.push_back(dist);
+        }
 
-                boundaries++;
+    
+    for (int i = 0; i < V.rows(); ++i) {
+        Eigen::Vector3d n = N_vertices.row(i);
+        double min_dist = *std::min_element(dist_map[i].begin(), dist_map[i].end());
+        float sigma_c = min_dist;
+
+        double average_offset = 0;
+        int neighbour_count = 0;
+        std::vector<double> offset_dist;
+        offset_dist.clear();
+        for (int j = 0; j < neighbour_map[i].size(); ++j) {
+            float offset_d=0;
+            if (dist_map[i][j] < 2 * sigma_c) {
+              Eigen::Vector3d vec = V.row(i) - V.row(neighbour_map[i][j]);
+                // float t = dist_map[i][j];
+                float d = n.x() * vec.x() + n.y() * vec.y() + n.z() * vec.z();
+                offset_d=sqrt(d*d);
+                average_offset += offset_d;
+                neighbour_count++;
+            }
+            offset_dist.push_back(offset_d);
+        }
+        if (neighbour_count > 0) {
+            average_offset /= neighbour_count;
+        }
+
+        float off_set_dis = 0;
+        for (int j = 0; j < neighbour_map[i].size(); ++j) {
+            if (dist_map[i][j] < 2 * sigma_c) {
+                off_set_dis += (offset_dist[j] - average_offset) * (offset_dist[j] - average_offset);
             }
         }
+        float sigma_s ;
+        off_set_dis= off_set_dis / neighbour_count;
+        if (sqrt(off_set_dis) < 1.0e-12)sigma_s=sqrt(off_set_dis) + 1.0e-12;
+        else sigma_s=sqrt(off_set_dis);
+        sigma_s=2*sigma_s;
+        float sum = 0;
+        float normalizer = 0;
+        for (int j = 0; j < neighbour_map[i].size(); ++j) {
+            if (dist_map[i][j] < 2 * sigma_c) {
+                Eigen::Vector3d vec =  V.row(neighbour_map[i][j])-V.row(i);
+                float t = dist_map[i][j];
+                float h = n.x() * vec.x() + n.y() * vec.y() + n.z() * vec.z();
+                double wc = exp(-1 * t * t / (2 * sigma_c * sigma_c));
+                double ws = exp(-1 * h * h / (2 * sigma_s * sigma_s));
+                sum += wc * ws * h;
+                normalizer += wc * ws;
+            }
+        }
+        if (normalizer != 0) {
+          // std::cout<<(sum / normalizer)<<std::endl;
+            V.row(i) = V.row(i) + (sum / normalizer) * N_vertices.row(i);
+        }
     }
-
-
-    return boundaries;
+    }
 }
 
+
+
+
+
+
+bool key_down(igl::opengl::glfw::Viewer &viewer, unsigned char key, int modifier)
+{
+  std::cout << "pressed Key: " << key << " " << (unsigned int)key << std::endl;
+  if (key == 'B')
+  {
+    bilateral(V,F);
+  }
+  else if (key == 'R')
+  {
+    add_noise(V,0.001);
+  }
+  else if (key == 'N')
+  {
+    add_noise_along_normals(V,0.001);
+  }
+  else if (key == 'S')
+  {
+    string output_file="../denoised/"+file.substr(file.find_last_of("/") + 1);
+
+    igl::writeOBJ(output_file, V, F);
+  }
+  else if (key == 'W')
+  {
+    string output_file="../noise/"+file.substr(file.find_last_of("/") + 1);
+
+    igl::writeOBJ(output_file, V, F);
+  }
+
+  else
+    return false;
+
+  viewer.data(0).clear();
+  viewer.data(0).set_mesh(V, F);
+
+  return false;
+}
 
 
 
 
 // ------------ main program ----------------
-int main(int argc, char *argv[]) {
-
-//    if(argc<2) {
-//        std::cout << "Error: input file required (.OFF)" << std::endl;
-//        return 0;
-//    }
-//    std::cout << "reading input file: " << argv[1] << std::endl;
-
-//    igl::readOFF(argv[1], V, F);
-        igl::readOFF("../data/cube_tri.off",V,F);
-
-    //print the number of mesh elements
-        //std::cout << "Points: " << V.rows() << std::endl;
-
-
-       HalfedgeBuilder* builder=new HalfedgeBuilder();  //
-
-       HalfedgeDS he=builder->createMesh(V.rows(), F);  //
-
-    // compute vertex degrees
-        // vertexDegreeStatistics(he);  //
-        // lib_vertexDegrees();
-
-    // compute number of boundaries
-        int B=countBoundaries(he);  //
-        std::cout << "The mesh has " << B << " boundaries" << std::endl << std::endl;//
-    // find_neighbours(he);
-//    for (int i=0;i<V.rows();++i){
-//
-//        std::cout << "number of degrees for vertex-"<<i<<" = "<< vertex_neighbours(he,i)<<std::endl;
-//    }
-//
-    
-    MatrixXd L = surfaceLaplace(he);
-    std::cout << "========== Laplace matrix =========== " << std::endl;
-    std::cout<< L <<std::endl;
-    
-    SelfAdjointEigenSolver<MatrixXd> eigen_solver(L);
-    MatrixXd u_,v_;
-    u_ = eigen_solver.eigenvalues();
-    v_ = eigen_solver.eigenvectors();
-    
-    std::cout << "========== eigenvalues =========== " << std::endl;
-    std::cout<< u_ <<std::endl;
-    std::cout << "========== eigenvectors =========== " << std::endl;
-    std::cout<< v_ <<std::endl;
-    
-
-
- ///////////////////////////////////////////
-
-  // Plot the mesh with pseudocolors
-  igl::opengl::glfw::Viewer viewer; // create the 3d viewer
-
-  viewer.callback_key_down = &key_down;
-  viewer.data().show_lines = false;
-  viewer.data().set_mesh(V, F);  //
-  viewer.data().set_normals(N_faces);  //
-  std::cout<<
-    "Press '1' for per-face normals calling pre-defined functions of LibiGL."<<std::endl<<
-    "Press '2' for per-vertex normals calling pre-defined functions of LibiGL."<<std::endl<<
-    "Press '3' for lib_per-vertex normals using face-vertex structure of LibiGL ."<<std::endl<<
-    "Press '4' for HE_per-vertex normals using HalfEdge structure."<<std::endl;
-
-
-    VectorXd Z;
-    Z.setZero(V.rows(),1);
-
-//  Z colors
-   // Use the z coordinate as a scalar field over the surface
-    for(int i ; i<V.rows();++i){
-    Z[i]= V.row(i).z();
+int main(int argc, char *argv[])
+{
+  if(argc<2) {
+    std::cout << "Error: input file required (.ply)" << std::endl;
+    return 0;
+  }
+  std::cout << "reading input file: " << argv[1] << std::endl;
+  file = argv[1];
+  if(file.substr(file.find_last_of(".") + 1) == "off") {
+        igl::readOFF(file,V,F);
+    }else if(file.substr(file.find_last_of(".") + 1) == "obj"){
+        igl::readOBJ(file,V,F);
+    }else {
+        std::cout << "ELSE..." << std::endl;
     }
+  std::cout << "Points: " << V.rows() << std::endl;
 
-    MatrixXd C;
-  // Assign per-vertex colors
-    igl::jet(Z,true,C);
-    viewer.data().set_colors(C);  // Add per-vertex colors
+  build_neighbour();
 
-  //viewer.core(0).align_camera_center(V, F);  //not needed
-    viewer.launch(); // run the viewer
+  igl::opengl::glfw::Viewer viewer; // create the 3d viewer
+  viewer.callback_key_down = &key_down;
+  viewer.data(0).set_mesh(V, F);
+  viewer.launch(); // run the viewer
 }
+
+
+
+
